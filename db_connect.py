@@ -15,13 +15,12 @@ BIN_COUNT=2
 
 class dbMedbox():
         ###########################################################
-    def __init__(self, boxId, lati, longi):
-        """Constructor arg: requires a boxId.
-        lati & longi values can be set to False, but need supplied
+    def __init__(self, lati, longi):
+        """lati & longi values can be set to False, but need supplied
         before box put in active mode (by admin or stocker who then can't open).
-        Usage: Create a new dbMedbox instance once per boxId"""
+        Usage: Create a new dbMedbox instance once in program."""
         ###########################################################
-        self.boxId=boxId
+        self.boxId=0
         self.pyVs=sys.version_info.major #remove once known 
         self.mode=0         #0=inactive/restock,
                             #1=active,
@@ -40,10 +39,10 @@ class dbMedbox():
         global BIN_COUNT
         self.verifyByBin={i:False for i in range(BIN_COUNT)}
         self.mileRadius=1   #miles allowed to roam
-        self.latitude=False #current lat
-        self.longitude=False#current long
-        self.latCenter=False#lat at center auth radius
-        self.longCenter=False
+        self.latitude=lati if lati else None  #current lat
+        self.longitude=longi if longi else None #current long
+        self.latCenter=None #lat at center auth radius
+        self.longCenter=None
         self.latDegInSM=0   #stores calc of miles in degree latitude by current latitude
         self.longDegInSM=0  #stores calc of miles in degree longitude by current latitude
         self.kitNeeds={}    #stores {int binPos:list item props}
@@ -55,10 +54,11 @@ class dbMedbox():
                                 #[route (ie 'SUBCUTANEOUS'),
                                 # dosage (ie '40 mg/ml, .005 mg/ml')]
         self.full=False
+        self.setBoxId()
         if not lati or not longi:
             self.setDegrees(37,100)
         else:
-            self.setDegrees(lati, longi)
+            self.setDegrees(lati, longi, True)
 
         
     ###############################################################    
@@ -77,9 +77,17 @@ class dbMedbox():
             pass
         self.cnx.close()
 
+    def setBoxId(self):
+        self.__connect()
+        #each db in the box unit will only hold 1 box id, through which it can
+        #sync with a master db not help on unit.
+        self.cursor.execute("""SELECT id FROM box LIMIT 1;""")
+        self.boxId=int([i[0] for i in self.cursor][0])
+        self.__complete()
+
 
     def log(self, eventStr, drug_ndc=None, equipt_upn=None, rfid_id=None, code=0):
-        now=dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+        now=dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if eventStr[0:14]=="BOX: FAIL OPEN":
             res=self.cursor.execute("""INSERT INTO logbox
             (tm, latitude, longitude, box_id, event, rfid_id, mode, code)
@@ -117,10 +125,37 @@ class dbMedbox():
         return False
 
         ###########################################################
-    def setDegrees(self, lat, longi):
+    def setDegrees(self, lat, longi, reset=False):
         """Call ONCE with new lat * long given after creating
         medboxDB object IF lat / long given as False in constructor
         """########################################################
+        r=True
+        self.__connect()
+        self.cursor.execute("""SELECT latitude, longitude FROM box WHERE id=%s
+                            LIMIT 1;""",(self.boxId))
+        curLat=False
+        curLong=False
+        for i in self.cursor:
+            curLat=i[0]
+            curLong=i[1]
+        if (curLat and curLong) and not reset:
+            global DEV_MODE
+            if DEV_MODE:
+                print("lat:"+curLat+";long:"+curLong)
+            lat=curLat
+            long=curLong
+            res1=self.cursor.execute("""UPDATE box SET latitude=%s WHERE id=%s;
+    """,(lat, self.boxId))
+            self.cursor.__complete()
+            self.cursor.__connect()
+            res2=self.cursor.execute("""UPDATE box SET longitude=%s WHERE id=%s;
+    """,(long, self.boxId))
+            self.cursor.__complete()
+            r=res1 and res1==res2
+        if not self.latitude:
+            self.latitude=lat
+        if not self.longitude:
+            self.longitude=long
         self.longCenter=longi
         self.latCenter=lat
         metersInMile=0.000621371
@@ -133,6 +168,7 @@ class dbMedbox():
         p3=0.118;
         self.latDegInSM=(m1+(m2*math.cos(2*lat))+(m3*math.cos(4*lat))+(m4+math.cos(6*lat)))*metersInMile
         self.longDegInSM=((p1*math.cos(lat))+(p2*math.cos(3*lat))+(p3*math.cos(5*lat)))*metersInMile
+        return r
 
 
 
@@ -156,14 +192,14 @@ class dbMedbox():
             for i in self.cursor:
                 if i[2] and i[2]>0 and self.mode==1:
                     self.lastRFID=i[0]
-                    self.log("BOX: SUCESS OPEN")
+                    self.log("BOX: SUCESS RFID VERIFIED")
                     self.openAuth=True
                     self.__complete()
                     if i[2]==2:
                         self.isAdmin1=True
                     return {int(i[0]):i[1]}
                 elif self.mode==1:# && auth < 1
-                    self.log("BOX: FAIL OPEN BAD AUTH", None, None, i[0])
+                    self.log("BOX: FAIL RFID VERIFY BAD AUTH", None, None, i[0])
                     self.__complete()
                     self.openAuth=False
                     return False
@@ -175,11 +211,11 @@ class dbMedbox():
                         #TODO!!!!!!!!!!!!!!!!!!!!!!!!!
                         #if still needs filled...
                 else:#fail secure
-                    self.log("BOX: FAIL OPEN", None, None, i[0])
+                    self.log("BOX: FAIL RFID VERIFY", None, None, i[0])
                     self.__complete()
                     self.openAuth=False
                     return False
-        self.log("BOX: FAIL OPEN UNKNOWN AUTH "+rfidIn)#not found
+        self.log("BOX: FAIL RFID VERIFY UNKNOWN AUTH "+rfidIn)#not found
         self.__complete()
         self.openAuth=False
         return False
@@ -198,15 +234,26 @@ class dbMedbox():
         """Use: call when box closed.
         Opt arg: mode to go to. Default 1, active.
             Options -1 security alert, 0 inactive/restock, 2 admin
+        return bool success
         """########################################################
         self.__connect()
         self.log("BOX: CLOSED")
+        self.open=False
+        self.__connect()
+        res=self.cursor.execute("UPDATE box SET open=0;")
+        self.__complete()
+        res2=1
         if not isAdmin2:
             self.openAuth=False
             self.numReqstByBin={}
             self.isAdmin1=False
-            self.mode=mode
+            if mode != self.mode:
+                self.mode=mode
+                self.__connect()
+                res2=self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+                self.__complete()
             numReqstByBin={}
+        return True if res and res2 else False
         
         ###########################################################        
     def checkMode(self, expected=1):
@@ -221,11 +268,13 @@ class dbMedbox():
         self.__connect()
         self.cursor.execute("""SELECT COUNT(id) AS warning_count
         FROM logbox WHERE code=-1 AND tm>%s;
-        """,(hrAgo.strftime('%Y-%m-%dT%H:%M:%SZ')))
+        """,(hrAgo.strftime('%Y-%m-%d %H:%M:%S')))
         warnings=[i for i in self.cursor][0][0]
         global WARNING_TOLERANCE
         if warnings > WARNING_TOLERANCE:
             self.mode=-1
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
         if self.mode !=expected:
             return False
         return True
@@ -235,7 +284,7 @@ class dbMedbox():
         """use: regularly update latitude with info from rfid and
             check if in approved range
         returns:    1=in range
-                    0=OUT OF RANGE UNDER 1/4 MILE - wanrning
+                    0=OUT OF RANGE UNDER 1/4 MILE - warning
                    -1=security alert
         """########################################################
         self.latitude=newLat
@@ -244,9 +293,14 @@ class dbMedbox():
         longRange=self.longCenter*self.longDegInSM
         r=1
         if newLat > self.latCenter+latRange or newLat < self.latCenter-latRange:
+            self.__connect()
             if newLat-(self.latCenter+latRange) > self.latDegInSM/4 or (self.latCenter+latRange)-newLat > self.latDegInSM/4:
                 self.mode=-1
+                self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+                self.__complete()
+                self.__connect()
                 self.log("ALERT: BOX OUT OF RANGE OVER 1/4 MILE", None, None, None, -1)
+                self.complete()
                 self.authOpen=False
                 self.isAdmin1=False
                 self.isAdmin2=False
@@ -256,9 +310,14 @@ class dbMedbox():
                 self.authOpen=False
                 r=0
         if newLong > self.longCenter+longRange or newLong < self.longCenter-longRange:
+            self.__connect()
             if newLong-(self.longCenter+longRange) > self.longDegInSM/4 or (self.longCenter+longRange)-newLong > self.longDegInSM/4:
                 self.mode=-1
+                self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+                self.__complete()
+                self.__connect()
                 self.log("ALERT: BOX OUT OF RANGE OVER 1/4 MILE", None, None, None, -1)
+                self.complete()
                 self.authOpen=False
                 self.isAdmin1=False
                 self.isAdmin2=False
@@ -278,14 +337,25 @@ class dbMedbox():
         """########################################################
         if self.isAdmin2 and self.isAdmin1:
             self.nextMode=mode
+            self.__connect()
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
+            self.__connect()
             self.log("MODE: CHANGE TO "+str(self.mode))
             return 1
         elif isStocker and self.mode==0 and mode==1:
+            self.__connect()
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
             self.log("MODE: CHANGE TO "+str(self.mode))
             return 1            
         else:
-            self.log("ALERT: UNAUTHORIZED MODE CHANGE ATTEMPT", None, None, None, -1)
             self.mode=-1
+            self.__connect()
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
+            self.__connect()
+            self.log("ALERT: UNAUTHORIZED MODE CHANGE ATTEMPT", None, None, None, -1)
             return -1
         
         ###########################################################
@@ -432,14 +502,23 @@ ORDER BY score DESC LIMIT %s;"""
         self.numReqstByBin=numReqstByBin
         self.log("BOX: OPENED")
         self.open=True
+        self.__connect()
+        res=self.cursor.execute("UPDATE box SET open=1;")
+        self.__complete()
         #security alert if bin opened while box not auth'd to be open
         self.__connect()
-        if self.mode!=1:
+        if self.mode<1:
             self.mode=-1
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
+            self.__connect()
             self.log("ALERT: BOX OPEN WHILE NOT IN ACTIVE MODE", None, none, None, -1)
         self.__connect()
         if not self.openAuth:
             self.mode=-1
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
+            self.__connect()
             self.log("ALERT: BOX OPEN WHILE NOT AUTHORIZED", None, none, None, -1)
         self.__complete()
 
@@ -462,13 +541,22 @@ ORDER BY score DESC LIMIT %s;"""
         #security alert if bin opened while box not auth'd to be open
         if self.mode < 1:
             self.mode=-1
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
+            self.__connect()
             self.log("ALERT: BIN OPEN TO TAKE ITEM NOT ACTIVE MODE",None,None,None,-1)
         self.__connect()
         if not self.openAuth:
             self.mode=-1
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
+            self.__connect()
             self.log("ALERT: BIN OPEN WHILE NOT AUTHORIZED",None,None,None,-1)
         if not self.open:
             self.mode=-1
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
+            self.__connect()
             self.log("ALERT: BIN OPEN WHILE BOX REGISTERED CLOSED",None,None,None,-1)
         #security warning if unrequested bin opened or bin opened more then once on auth
         try:
@@ -518,6 +606,9 @@ ORDER BY score DESC LIMIT %s;"""
                     self.__connect()
                 except:
                     pass
+                self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+                self.__complete()
+                self.__connect()
                 self.log("BOX: EMPTY")
                 self.__complete()
                 if self.mode>0 and self.openAuth:
@@ -560,6 +651,9 @@ ORDER BY score DESC LIMIT %s;"""
                 self.isAdmin2==True
                 self.lastMode=self.mode
                 self.mode=2
+                self.__connect()
+                self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+                self.__complete()
                 return 1
             else:
                 self.log("WARNING: BAD LOGIN ATTEMPT", None, None, None, -1)
@@ -569,6 +663,9 @@ ORDER BY score DESC LIMIT %s;"""
                 return 0
         self.mode=-1
         self.log("ALERT: UNAUTHORIZED LOGIN ATTEMPT", None, None, None, -1)
+        self.__connect()
+        self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+        self.__complete()
         return -1
 
         ###########################################################
@@ -616,6 +713,9 @@ ORDER BY score DESC LIMIT %s;"""
         self.__connect()
         self.log("ALERT: UNAUTHORIZED ADMIN CRED CHANGE ATTEMPT", None, None, None, -1)
         self.mode=-1
+        self.__connect()
+        self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+        self.__complete()
         return -1
 
         
@@ -635,6 +735,9 @@ ORDER BY score DESC LIMIT %s;"""
             return 0
         self.log("ALERT: UNAUTHORIZED WARNING_TOLERANCE CHANGE ATTEMPT", None, None, None, -1)
         self.mode=-1
+        self.__connect()
+        self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+        self.__complete()        
         return -1
             
 
@@ -644,6 +747,7 @@ ORDER BY score DESC LIMIT %s;"""
                     0=not admin mode/no change
                     1=success
         """
+        self.__connect()
         if self.isAdmin2 and self.isAdmin1:
             if self.mode==2:
                 self.mileRadius=miles
@@ -654,6 +758,9 @@ ORDER BY score DESC LIMIT %s;"""
         else:
             self.log("ALERT: UNAUTHORIZED RADIUS CHANGE ATTEMPT", None, None, None, -1)
             self.mode=-1
+            self.__connect()
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete() 
             return -1
 
     def getBoxLog(self):
@@ -680,13 +787,44 @@ ORDER BY score DESC LIMIT %s;"""
         else:
             self.log("ALERT: UNAUTHORIZED ATTEMPT TO GET LOGS", None, None, None, -1)
             self.mode=-1
+            self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+            self.__complete()
             return -1
 
-    #TODO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    #todo - check auth first
+
+    def assignBoxId(self, boxId):
+        self.boxId=boxId
+        self.__connect()
+        self.cursor.execute("SELECT id FROM box LIMIT 1;")
+        currentId=int([i[0] for i in self.cursor][0])
+        if currentId:
+            if currentId==boxId:
+                self.boxId=boxId
+                return 1
+            else:
+                res=self.cursor.execute("UPDATE box SET id=%s;",(boxId))
+                self.__complete()
+                if res:
+                    self.boxId=boxId
+                    return 1
+                return 0
+        res=self.cursor.execute("""INSERT INTO box
+    (id, mode, open, latitude, longitude) VALUES (%s,%s,%s,%s,%s);
+    """,(boxId, self.mode, self.open, self.latitude, self.longitude))
+        self.__complete()
+        if res:
+            self.boxId=boxId
+            return 1
+        return 0
+        
 
     def changeCenterPoint(self, lat, longi):
-        self.setDegrees(lat, longi)
+        res=self.setDegrees(lat, longi, True)
 
+
+    #TODO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        
     def addWorker(self, name, employerId, employeeId):
         pass
         
@@ -698,6 +836,9 @@ ORDER BY score DESC LIMIT %s;"""
 
     def changeAuth(self, num, auth):
         pass
+
+    def resetBox(self):
+        self.__init__(self.latitude, self.longitude)
     
 
 
