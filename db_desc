@@ -1,0 +1,128 @@
+mysql> show tables;
++------------------+
+| Tables_in_medbox |
++------------------+
+| bin              |
+| box              |
+| drug             |
+| equipt           |
+| kit              |
+| logbox           |
+| other            |
+| rfid             |
+| worker           |
++------------------+
+9 rows in set (0.00 sec)
+
+mysql> desc box;
++-----------+---------------------+------+-----+---------+-------+
+| Field     | Type                | Null | Key | Default | Extra |
++-----------+---------------------+------+-----+---------+-------+
+| id        | bigint(20) unsigned | NO   | PRI | NULL    |       |
+| mode      | tinyint(1)          | YES  |     | 0       |       |
+| open      | tinyint(1)          | YES  |     | 0       |       |
+| latitude  | double(10,8)        | YES  |     | NULL    |       |
+| longitude | double(11,8)        | YES  |     | NULL    |       |
++-----------+---------------------+------+-----+---------+-------+
+5 rows in set (0.01 sec)
+
+mysql> desc bin;
++------------+---------------------+------+-----+---------+----------------+
+| Field      | Type                | Null | Key | Default | Extra          |
++------------+---------------------+------+-----+---------+----------------+
+| count      | tinyint(3) unsigned | NO   |     | 0       |                |
+| angle      | float(6,3) unsigned | NO   |     | 0.000   |                |
+| drug_ndc   | bigint(10) unsigned | YES  | MUL | NULL    |                |
+| equipt_upn | varchar(20)         | YES  | MUL | NULL    |                |
+| box_id     | bigint(20) unsigned | NO   | MUL | NULL    |                |
+| pos        | tinyint(1) unsigned | NO   |     | 0       |                |
+| id         | bigint(20) unsigned | NO   | PRI | NULL    | auto_increment |
++------------+---------------------+------+-----+---------+----------------+
+7 rows in set (0.02 sec)
+
+mysql> desc drug;
++------------+---------------------+------+-----+---------+-------+
+| Field      | Type                | Null | Key | Default | Extra |
++------------+---------------------+------+-----+---------+-------+
+| brand_name | varchar(80)         | NO   |     | NULL    |       |
+| gen_name   | varchar(100)        | NO   |     | NULL    |       |
+| schedule   | tinyint(1)          | YES  |     | NULL    |       |
+| route      | varchar(50)         | NO   |     | NULL    |       |
+| dosage     | varchar(24)         | NO   |     | NULL    |       |
+| ndc        | bigint(10) unsigned | NO   | PRI | NULL    |       |
+| max_count  | tinyint(3) unsigned | NO   |     | 1       |       |
+| weight     | float(8,5) unsigned | NO   |     | 0.50000 |       |
++------------+---------------------+------+-----+---------+-------+
+8 rows in set (0.00 sec)
+
+mysql> desc equipt;
++-----------+---------------------+------+-----+---------+-------+
+| Field     | Type                | Null | Key | Default | Extra |
++-----------+---------------------+------+-----+---------+-------+
+| upn       | varchar(20)         | NO   | PRI | NULL    |       |
+| name      | varchar(80)         | NO   |     | NULL    |       |
+| max_count | tinyint(3) unsigned | NO   |     | 1       |       |
+| weight    | float(8,5) unsigned | NO   |     | 0.50000 |       |
++-----------+---------------------+------+-----+---------+-------+
+4 rows in set (0.00 sec)
+
+mysql> desc kit;
++------------+---------------------+------+-----+---------+----------------+
+| Field      | Type                | Null | Key | Default | Extra          |
++------------+---------------------+------+-----+---------+----------------+
+| id         | int(10) unsigned    | NO   | PRI | NULL    | auto_increment |
+| name       | varchar(80)         | NO   |     | NULL    |                |
+| drug_ndc   | bigint(10) unsigned | YES  | MUL | NULL    |                |
+| equipt_upn | varchar(20)         | YES  | MUL | NULL    |                |
+| score      | float(5,2)          | NO   |     | 50.00   |                |
++------------+---------------------+------+-----+---------+----------------+
+5 rows in set (0.00 sec)
+
+mysql> desc logbox;
++------------+---------------------+------+-----+---------+----------------+
+| Field      | Type                | Null | Key | Default | Extra          |
++------------+---------------------+------+-----+---------+----------------+
+| id         | bigint(20) unsigned | NO   | PRI | NULL    | auto_increment |
+| tm         | datetime            | NO   |     | NULL    |                |
+| latitude   | double(10,8)        | NO   |     | NULL    |                |
+| longitude  | double(11,8)        | NO   |     | NULL    |                |
+| drug_ndc   | bigint(10) unsigned | YES  | MUL | NULL    |                |
+| box_id     | bigint(20) unsigned | NO   | MUL | NULL    |                |
+| event      | varchar(50)         | NO   |     | NULL    |                |
+| rfid_id    | int(10) unsigned    | YES  | MUL | NULL    |                |
+| mode       | tinyint(1)          | YES  |     | 1       |                |
+| equipt_upn | varchar(20)         | YES  | MUL | NULL    |                |
+| code       | tinyint(1)          | NO   |     | 0       |                |
++------------+---------------------+------+-----+---------+----------------+
+11 rows in set (0.01 sec)
+
+mysql> desc rfid;
++-----------+---------------------+------+-----+---------+----------------+
+| Field     | Type                | Null | Key | Default | Extra          |
++-----------+---------------------+------+-----+---------+----------------+
+| data      | varchar(161)        | NO   | UNI | NULL    |                |
+| id        | int(10) unsigned    | NO   | PRI | NULL    | auto_increment |
+| worker_id | bigint(20) unsigned | YES  | MUL | NULL    |                |
+| auth      | tinyint(1)          | NO   |     | -1      |                |
++-----------+---------------------+------+-----+---------+----------------+
+4 rows in set (0.00 sec)
+
+mysql> desc worker;
++-------------+---------------------+------+-----+---------+----------------+
+| Field       | Type                | Null | Key | Default | Extra          |
++-------------+---------------------+------+-----+---------+----------------+
+| id          | bigint(20) unsigned | NO   | PRI | NULL    | auto_increment |
+| name        | varchar(80)         | NO   |     | NULL    |                |
+| employer_id | bigint(20) unsigned | NO   |     | NULL    |                |
+| employee_id | varchar(50)         | NO   |     | NULL    |                |
++-------------+---------------------+------+-----+---------+----------------+
+4 rows in set (0.01 sec)
+
+mysql> desc other;
++---------+------------------+------+-----+---------+-------+
+| Field   | Type             | Null | Key | Default | Extra |
++---------+------------------+------+-----+---------+-------+
+| rfid_id | int(10) unsigned | NO   | MUL | NULL    |       |
+| data    | varchar(290)     | NO   | PRI | NULL    |       |
++---------+------------------+------+-----+---------+-------+
+2 rows in set (0.00 sec)
