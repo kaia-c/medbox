@@ -19,8 +19,8 @@ mysql> desc box;
 | Field     | Type                | Null | Key | Default | Extra |
 +-----------+---------------------+------+-----+---------+-------+
 | id        | bigint(20) unsigned | NO   | PRI | NULL    |       |
-| mode      | tinyint(1)          | YES  |     | 0       |       |
-| open      | tinyint(1)          | YES  |     | 0       |       |
+| mode      | tinyint(1)          | YES  |     | 0       |       |*0=inactive, -1=security alert, 1=active, 2-admin
+| open      | tinyint(1)          | YES  |     | 0       |       |*bool
 | latitude  | double(10,8)        | YES  |     | NULL    |       |
 | longitude | double(11,8)        | YES  |     | NULL    |       |
 +-----------+---------------------+------+-----+---------+-------+
@@ -32,10 +32,10 @@ mysql> desc bin;
 +------------+---------------------+------+-----+---------+----------------+
 | count      | tinyint(3) unsigned | NO   |     | 0       |                |
 | angle      | float(6,3) unsigned | NO   |     | 0.000   |                |
-| drug_ndc   | bigint(10) unsigned | YES  | MUL | NULL    |                |
-| equipt_upn | varchar(20)         | YES  | MUL | NULL    |                |
+| drug_ndc   | bigint(10) unsigned | YES  | MUL | NULL    |                |*if item inserted either drug_dnc or equipt_upn
+| equipt_upn | varchar(20)         | YES  | MUL | NULL    |                |will be NULL not both
 | box_id     | bigint(20) unsigned | NO   | MUL | NULL    |                |
-| pos        | tinyint(1) unsigned | NO   |     | 0       |                |
+| pos        | tinyint(1) unsigned | NO   |     | 0       |                |*int pos in box
 | id         | bigint(20) unsigned | NO   | PRI | NULL    | auto_increment |
 +------------+---------------------+------+-----+---------+----------------+
 7 rows in set (0.02 sec)
@@ -50,7 +50,7 @@ mysql> desc drug;
 | route      | varchar(50)         | NO   |     | NULL    |       |
 | dosage     | varchar(24)         | NO   |     | NULL    |       |
 | ndc        | bigint(10) unsigned | NO   | PRI | NULL    |       |
-| max_count  | tinyint(3) unsigned | NO   |     | 1       |       |
+| max_count  | tinyint(3) unsigned | NO   |     | 1       |       |*that fits in bin
 | weight     | float(8,5) unsigned | NO   |     | 0.50000 |       |
 +------------+---------------------+------+-----+---------+-------+
 8 rows in set (0.00 sec)
@@ -74,9 +74,9 @@ mysql> desc kit;
 | name       | varchar(80)         | NO   |     | NULL    |                |
 | drug_ndc   | bigint(10) unsigned | YES  | MUL | NULL    |                |
 | equipt_upn | varchar(20)         | YES  | MUL | NULL    |                |
-| score      | float(5,2)          | NO   |     | 50.00   |                |
-+------------+---------------------+------+-----+---------+----------------+
-5 rows in set (0.00 sec)
+| score      | float(5,2)          | NO   |     | 50.00   |                |*can be asigned from master db this will connect to
++------------+---------------------+------+-----+---------+----------------+so to determine which highest priority to bring               
+5 rows in set (0.00 sec)                                                    based on what gets used up most often
 
 mysql> desc logbox;
 +------------+---------------------+------+-----+---------+----------------+
@@ -92,18 +92,18 @@ mysql> desc logbox;
 | rfid_id    | int(10) unsigned    | YES  | MUL | NULL    |                |
 | mode       | tinyint(1)          | YES  |     | 1       |                |
 | equipt_upn | varchar(20)         | YES  | MUL | NULL    |                |
-| code       | tinyint(1)          | NO   |     | 0       |                |
-+------------+---------------------+------+-----+---------+----------------+
-11 rows in set (0.01 sec)
-
+| code       | tinyint(1)          | NO   |     | 0       |                |*-1 security warning or alert, 0-normal op, 1-error
++------------+---------------------+------+-----+---------+----------------+ -1's will be counted per hr in .py file and box 
+11 rows in set (0.01 sec)                                                    will go to alert status if exceeds warning                                                                        
+                                                                             tolerance set by admin
 mysql> desc rfid;
 +-----------+---------------------+------+-----+---------+----------------+
 | Field     | Type                | Null | Key | Default | Extra          |
 +-----------+---------------------+------+-----+---------+----------------+
-| data      | varchar(161)        | NO   | UNI | NULL    |                |
+| data      | varchar(161)        | NO   | UNI | NULL    |                |*currently a 512 bit sha2 hash
 | id        | int(10) unsigned    | NO   | PRI | NULL    | auto_increment |
 | worker_id | bigint(20) unsigned | YES  | MUL | NULL    |                |
-| auth      | tinyint(1)          | NO   |     | -1      |                |
+| auth      | tinyint(1)          | NO   |     | -1      |                |*-1=inactive, 0-stocker, 1=med tech, 2=admin
 +-----------+---------------------+------+-----+---------+----------------+
 4 rows in set (0.00 sec)
 
@@ -113,16 +113,16 @@ mysql> desc worker;
 +-------------+---------------------+------+-----+---------+----------------+
 | id          | bigint(20) unsigned | NO   | PRI | NULL    | auto_increment |
 | name        | varchar(80)         | NO   |     | NULL    |                |
-| employer_id | bigint(20) unsigned | NO   |     | NULL    |                |
-| employee_id | varchar(50)         | NO   |     | NULL    |                |
+| employer_id | bigint(20) unsigned | NO   |     | NULL    |                |*will connect in master_db not held in box
+| employee_id | varchar(50)         | NO   |     | NULL    |                |*match for easy ref in employers' db
 +-------------+---------------------+------+-----+---------+----------------+
 4 rows in set (0.01 sec)
 
 mysql> desc other;
 +---------+------------------+------+-----+---------+-------+
-| Field   | Type             | Null | Key | Default | Extra |
-+---------+------------------+------+-----+---------+-------+
+| Field   | Type             | Null | Key | Default | Extra |*table holds username/password data on admin who needs 2nd step 
++---------+------------------+------+-----+---------+-------+ verification to make changes offered after admin rfid swipe
 | rfid_id | int(10) unsigned | NO   | MUL | NULL    |       |
-| data    | varchar(290)     | NO   | PRI | NULL    |       |
+| data    | varchar(290)     | NO   | PRI | NULL    |       |*currently a 512 bit sha2 hash of username & password
 +---------+------------------+------+-----+---------+-------+
 2 rows in set (0.00 sec)
