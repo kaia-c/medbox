@@ -15,8 +15,8 @@ mysql> show tables;
 9 rows in set (0.00 sec)
 
 mysql> desc box;
-+-----------+---------------------+------+-----+---------+-------+
-| Field     | Type                | Null | Key | Default | Extra |
++-----------+---------------------+------+-----+---------+-------+*Only one row will be stored in the internal db for the medbox
+| Field     | Type                | Null | Key | Default | Extra | but this will connect by box.id to a master db
 +-----------+---------------------+------+-----+---------+-------+
 | id        | bigint(20) unsigned | NO   | PRI | NULL    |       |
 | mode      | tinyint(1)          | YES  |     | 0       |       |*0=inactive, -1=security alert, 1=active, 2-admin
