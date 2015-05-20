@@ -51,7 +51,7 @@ mysql> desc drug;
 | dosage     | varchar(24)         | NO   |     | NULL    |       |
 | ndc        | bigint(10) unsigned | NO   | PRI | NULL    |       |
 | max_count  | tinyint(3) unsigned | NO   |     | 1       |       |*that fits in bin
-| weight     | float(8,5) unsigned | NO   |     | 0.50000 |       |
+| weight     | float(8,5) unsigned | NO   |     | 0.50000 |       |*in oz., per unit
 +------------+---------------------+------+-----+---------+-------+
 8 rows in set (0.00 sec)
 
