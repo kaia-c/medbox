@@ -1,0 +1,27 @@
+Note - I didn't change yet - the pi uses py 2.7.3 as default interpreter. It has a 3.2 shell too. 
+I usually use latest (3.4) unless I need specific library support that's only for 2.7.
+We should all use same though - do we all like 3.4 or ?
+
+Set up to do:
+
+Install mysql to work with python:
+sudo apt-get install mysql-server python-mysqldb
+
+run mysql and set password to: RRCCpi2DC
+
+Set up pymysql library bindings - I did:
+pi@raspberrypi ~/Desktop $ curl -L https://github.com/PyMySQL/PyMySQL/tarball/pymysql-0.6 | tar xz
+pi@raspberrypi ~/Desktop $ ls -a
+.  ..  changelog  led.py  PyMySQL-PyMySQL-7c86923  repo
+pi@raspberrypi ~/Desktop $ cd PyMySql-PyMySql-7c86923
+pi@raspberrypi ~/Desktop/PyMySQL-PyMySQL-7c86923 $ sudo python setup.py install
+
+!note! next package needs installed before can install to py3 if py2 is installed already:
+
+pi@raspberrypi ~/Desktop/PyMySQL-PyMySQL-7c86923 $ wget https://bootstrap.pypa.io/ez_setup.py -O - | sudo python3
+pi@raspberrypi ~/Desktop/PyMySQL-PyMySQL-7c86923 $ sudo python3 setup.py install
+pi@raspberrypi ~/Desktop/PyMySQL-PyMySQL-7c86923 $ cd Desktop
+pi@raspberrypi ~/Desktop $ sudo rm -rf PyMySQL-PyMySQL-7c86923
+
+created and dumped db - you should be get the file and use:
+mysql -uroot -p < [/path/]db_medbox.sql 
