@@ -5,19 +5,25 @@ import sys
 import pymysql
 import datetime as dt
 import math
+import dbReset
+import gpsCalc
 
-WARNING_TOLERANCE=5 #=number of security warnings allowed in 1 hr.
+WARNING_TOLERANCE=float('inf')
+                    #=number of security warnings allowed in 1 hr.
                     #note - errors instantly change box mode, warnings
                     #can be set by admin to track lower priority concern accumulation
+                    #set to float('inf') to not track warnings
 DEV_MODE=True
-BIN_COUNT=2
+BIN_COUNT=9
+USE_2_LEVEL_AUTH=False
 
 
-class dbMedbox():
+class DbMedbox():
         ###########################################################
     def __init__(self, lati, longi):
         """lati & longi values can be set to False, but need supplied
-        before box put in active mode (by admin or stocker who then can't open).
+        before box put in active mode. They are the center point of range box
+        is authorized to roam
         Usage: Create a new dbMedbox instance once in program."""
         ###########################################################
         self.boxId=0
@@ -28,23 +34,23 @@ class dbMedbox():
                             #-1=security alert
         self.nextMode=0
         self.open=False
-        self.openAuth=False #True granted on checkRFID(rfid) success
+        self.openAuth=False #True granted on checkInRFID(rfid) success
         self.lastRFID=None  #self.lastRFID stores rfid.id key from
                             #last verfied RFID after first swipe.
         self.isAdmin1=False #True on verified rfid as admin
         self.isAdmin2=False #True on usernm/passwd verification by admin
+        global USE_2_LEVEL_AUTH
+        self.useAdmin2=USE_2_LEVEL_AUTH
         self.isStocker=False#True on RFID swipe by stocker
         self.numReqstByBin={}#stores {int binPos:int user requested from bin}
         #stores {int binPos:bool verify count on next open?}
         global BIN_COUNT
         self.verifyByBin={i:False for i in range(BIN_COUNT)}
         self.mileRadius=1   #miles allowed to roam
-        self.latitude=lati if lati else None  #current lat
-        self.longitude=longi if longi else None #current long
-        self.latCenter=None #lat at center auth radius
-        self.longCenter=None
-        self.latDegInSM=0   #stores calc of miles in degree latitude by current latitude
-        self.longDegInSM=0  #stores calc of miles in degree longitude by current latitude
+        self.latCenter=lati #lat at center auth radius
+        self.longCenter=longi
+        self.latitude=None
+        self.longitude=None
         self.kitNeeds={}    #stores {int binPos:list item props}
                             #where list item props =
                                 #[type('drug'|'equipt'),
@@ -53,20 +59,25 @@ class dbMedbox():
                             #if item type == 'drug' appends fields:
                                 #[route (ie 'SUBCUTANEOUS'),
                                 # dosage (ie '40 mg/ml, .005 mg/ml')]
-        self.full=False
         self.setBoxId()
         if not lati or not longi:
-            self.setDegrees(37,100)
+            self.setCenterLoc(40,-105)
         else:
-            self.setDegrees(lati, longi, True)
+            self.setCenterLoc(lati, longi, True)
+        self.checkInRange()
+        
 
         
     ###############################################################    
     #################    private-ish functions  ###################
     ###############################################################
     def __connect(self):
-        self.cnx=pymysql.connect(user="root", passwd="RRCCpi2DC", 
+        try:
+            self.cnx=pymysql.connect(user="root", passwd="RRCCpi2DC", 
             host="127.0.0.1", db="medbox", port=3306)
+        except:
+            self.cnx=pymysql.connect(user="root", host="127.0.0.1",
+                                 db="medbox", port=3306)
         self.cursor=self.cnx.cursor()
 
     def __complete(self):
@@ -113,7 +124,7 @@ class dbMedbox():
             self.cursor.execute("""SELECT data FROM other
             WHERE rfid_id=%s LIMIT 1;""",(self.lastRFID))
             cstr=[i[0] for i in self.cursor][0]
-            c=encrypt.crypt()
+            c=encrypt.Crypt()
             a,s,b=cstr.split(':')
             ok1=c.checkSha2_512(pswd, a+':'+s)
             if ok1:
@@ -124,51 +135,6 @@ class dbMedbox():
         self.__close()
         return False
 
-        ###########################################################
-    def setDegrees(self, lat, longi, reset=False):
-        """Call ONCE with new lat * long given after creating
-        medboxDB object IF lat / long given as False in constructor
-        """########################################################
-        r=True
-        self.__connect()
-        self.cursor.execute("""SELECT latitude, longitude FROM box WHERE id=%s
-                            LIMIT 1;""",(self.boxId))
-        curLat=False
-        curLong=False
-        for i in self.cursor:
-            curLat=i[0]
-            curLong=i[1]
-        if (curLat and curLong) and not reset:
-            global DEV_MODE
-            if DEV_MODE:
-                print("lat:"+curLat+";long:"+curLong)
-            lat=curLat
-            long=curLong
-            res1=self.cursor.execute("""UPDATE box SET latitude=%s WHERE id=%s;
-    """,(lat, self.boxId))
-            self.cursor.__complete()
-            self.cursor.__connect()
-            res2=self.cursor.execute("""UPDATE box SET longitude=%s WHERE id=%s;
-    """,(long, self.boxId))
-            self.cursor.__complete()
-            r=res1 and res1==res2
-        if not self.latitude:
-            self.latitude=lat
-        if not self.longitude:
-            self.longitude=long
-        self.longCenter=longi
-        self.latCenter=lat
-        metersInMile=0.000621371
-        m1=111131.92
-        m2=-559.82
-        m3=1.178
-        m4=-0.0023;
-        p1=111412.84;
-        p2=-93.5;
-        p3=0.118;
-        self.latDegInSM=(m1+(m2*math.cos(2*lat))+(m3*math.cos(4*lat))+(m4+math.cos(6*lat)))*metersInMile
-        self.longDegInSM=((p1*math.cos(lat))+(p2*math.cos(3*lat))+(p3*math.cos(5*lat)))*metersInMile
-        return r
 
 
 
@@ -176,40 +142,55 @@ class dbMedbox():
     ################ functions affecting all modes ################
     ###############################################################
 
-    def checkRFID(self,rfidIn):
-        """Arg:     rfidIn=string from RFID to check
-        returns:    a dict like {int(rfid.id):str(worker.name)} if rfidIn found
-                    and has proper auth, else False
+    ###############################################################
+    def checkInRFID(self,rfidIn):
+        """
+        use: FIRST after getting an RFID to set db status
+        arg:     rfidIn=string from RFID to check
+        returns:    bool auth for if mode allows open box for auth level
         """########################################################
-        c=encrypt.crypt()
+        c=encrypt.Crypt()
         self.__connect()
         self.cursor.execute("SELECT data FROM rfid;")
         hashStr=c.checkSha2_512(rfidIn, self.cursor)
         if hashStr:
-            self.cursor.execute("""SELECT r.id, w.name, r.auth
-            FROM rfid AS r JOIN worker AS w ON r.worker_id=w.id
-            WHERE r.data=%s LIMIT 1""",(hashStr))
+            self.cursor.execute("""SELECT id, auth
+            FROM rfid WHERE data=%s LIMIT 1""",(hashStr))
             for i in self.cursor:
-                if i[2] and i[2]>0 and self.mode==1:
+                if i[1] and i[1]>0 and self.mode==1:
                     self.lastRFID=i[0]
-                    self.log("BOX: SUCESS RFID VERIFIED")
+                    self.log("BOX: SUCCESS RFID VERIFIED", None, None, i[0])
                     self.openAuth=True
                     self.__complete()
-                    if i[2]==2:
+                    if i[1]==2:
                         self.isAdmin1=True
-                    return {int(i[0]):i[1]}
+                    return True
                 elif self.mode==1:# && auth < 1
                     self.log("BOX: FAIL RFID VERIFY BAD AUTH", None, None, i[0])
                     self.__complete()
                     self.openAuth=False
                     return False
-                elif self.mode==0 and (i[2]==0 or i[2]==2):
-                    if i[2]==0:
-                        return {int(i[0]):i[1]}
-                    else:
+                elif self.mode==0 and (i[1]==0 or i[1]==2):
+                    if i[1]==0:
                         self.isStocker=True
-                        #TODO!!!!!!!!!!!!!!!!!!!!!!!!!
-                        #if still needs filled...
+                        self.openAuth=True
+                        self.log("BOX: SUCCESS RFID VERIFIED", None, None, i[0])
+                        self.__complete()
+                        return True
+                    else: #i[1]==2, admin
+                        self.isStocker=False
+                        self.isAdmin1=True
+                        self.openAuth=True
+                        self.log("BOX: SUCCESS RFID VERIFIED", None, None, i[0])
+                        self.__complete()
+                        return True
+                elif self.mode==0:#and not admin or stocker
+                        self.isStocker=False
+                        self.isAdmin1=False
+                        self.openAuth=False
+                        self.log("BOX: FAIL RFID VERIFY BAD AUTH", None, None, i[0])
+                        self.__complete()
+                        return False
                 else:#fail secure
                     self.log("BOX: FAIL RFID VERIFY", None, None, i[0])
                     self.__complete()
@@ -220,14 +201,63 @@ class dbMedbox():
         self.openAuth=False
         return False
 
+
         ###########################################################
     def doubleCheck(self, rfid1, rfid2):
         """Args: 2 rfid strings
         return bool if both passed auth for mode
         """########################################################
-        a=self.checkRFID(rfid1)
-        b=self.checkRFID(rfid2)
+        a=self.checkInRFID(rfid1)
+        b=self.checkInRFID(rfid2)
         return (a and b)
+
+        ###########################################################
+    def getAuthByRFID(self,rfidIn=None):
+        """Optional arg: str(rfidIn)| default=last rfid used with checkInRFID
+        returns:    int auth for assoc with the rfid if found | False
+        """########################################################
+        r=False
+        if not rfidIn:
+            rfidIn=self.lastRFID
+            if self.isAdmin1:
+                r=2
+            elif self.openAuth:
+                r=self.mode
+        if r:
+            return r
+        self.__connect()
+        self.cursor.execute("SELECT data FROM rfid;")
+        c=encrypt.Crypt()
+        hashStr=c.checkSha2_512(rfidIn, self.cursor)
+        if hashStr:
+            self.cursor.execute("""SELECT auth
+            FROM rfid WHERE data=%s LIMIT 1""",(hashStr))
+            for i in self.cursor:
+                r=i[0]
+        self.__complete()
+        return r
+
+        ###########################################################
+    def getNameByRfid(self,rfidIn=None):
+        """Optional arg: str(rfidIn)| default=last rfid used with checkInRFID
+        returns:    str workerName if name assoc with rfid found | False
+        """########################################################
+        c=encrypt.crypt()
+        r=False
+        if not rfidIn:
+            rfidIn=self.lastRFID
+        self.__connect()
+        self.cursor.execute("SELECT data FROM rfid;")
+        hashStr=c.checkSha2_512(rfidIn, self.cursor)
+        if hashStr:
+            self.cursor.execute("""SELECT w.name
+            FROM rfid AS r JOIN worker AS w ON r.worker_id=w.id
+            WHERE r.data=%s LIMIT 1""",(hashStr))
+            for i in self.cursor:
+                r=i[0]
+        self.__complete()
+        return r
+        ###########################################################
     
         ###########################################################
     def boxClosed(self, mode=1):
@@ -243,7 +273,7 @@ class dbMedbox():
         res=self.cursor.execute("UPDATE box SET open=0;")
         self.__complete()
         res2=1
-        if not isAdmin2:
+        if not isAdmin2 and self.useAdmin2:
             self.openAuth=False
             self.numReqstByBin={}
             self.isAdmin1=False
@@ -280,27 +310,31 @@ class dbMedbox():
         return True
 
         ###########################################################
-    def checkInRadius(self, newLat, newLong):
+    def checkInRange(self, newLat=False, newLong=False):
         """use: regularly update latitude with info from rfid and
             check if in approved range
         returns:    1=in range
                     0=OUT OF RANGE UNDER 1/4 MILE - warning
                    -1=security alert
+        TODO: it's still checking in a square. Make a circle.
         """########################################################
-        self.latitude=newLat
-        self.longitude=newLong
-        latRange=self.latCenter*self.latDegInSM
-        longRange=self.longCenter*self.longDegInSM
+        gps=gpsCalc.GPS()
+        if newLat and newLong:
+            self.latitude=newLat
+            self.longitude=newLong
+        else:
+            self.latitude, self.longitude=gps.getLoc()
         r=1
-        if newLat > self.latCenter+latRange or newLat < self.latCenter-latRange:
+        dist=gps.getDistance(self.latitude, self.longitude, self.latCenter, self.longCenter)
+        if dist>self.mileRadius:
             self.__connect()
-            if newLat-(self.latCenter+latRange) > self.latDegInSM/4 or (self.latCenter+latRange)-newLat > self.latDegInSM/4:
+            if dist>self.mileRadius+0.25:
                 self.mode=-1
                 self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
                 self.__complete()
                 self.__connect()
                 self.log("ALERT: BOX OUT OF RANGE OVER 1/4 MILE", None, None, None, -1)
-                self.complete()
+                self.__complete()
                 self.authOpen=False
                 self.isAdmin1=False
                 self.isAdmin2=False
@@ -309,23 +343,30 @@ class dbMedbox():
                 self.log("WARNING: BOX OUT OF RANGE UNDER 1/4 MILE", None, None, None, -1)
                 self.authOpen=False
                 r=0
-        if newLong > self.longCenter+longRange or newLong < self.longCenter-longRange:
-            self.__connect()
-            if newLong-(self.longCenter+longRange) > self.longDegInSM/4 or (self.longCenter+longRange)-newLong > self.longDegInSM/4:
-                self.mode=-1
-                self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
-                self.__complete()
-                self.__connect()
-                self.log("ALERT: BOX OUT OF RANGE OVER 1/4 MILE", None, None, None, -1)
-                self.complete()
-                self.authOpen=False
-                self.isAdmin1=False
-                self.isAdmin2=False
-                return -1
-            else:
-                self.log("WARNING: BOX OUT OF RANGE UNDER 1/4 MILE", None, None, None, -1)
-                self.authOpen=False
-                return 0
+        return r
+
+        ###########################################################
+    def setCenterLoc(self, lat=False, longi=False):
+        """Call to set/rest center point for cicle box allowed to roam
+        Opt args: +- 90 decimal degrees latitude, +- 180 decimal degrees longitude
+        Uses current location points if not provided.
+        return: bool success
+        """########################################################
+        r=True
+        if not lat or not longi:
+            gps=gpsCalc.GPS()
+            lat, longi=gps.getLoc()
+        self.__connect()
+        res1=self.cursor.execute("""UPDATE box SET latitude=%s WHERE id=%s;
+    """,(lat, self.boxId))
+        self.__complete()
+        self.__connect()
+        res2=self.cursor.execute("""UPDATE box SET longitude=%s WHERE id=%s;
+    """,(longi, self.boxId))
+        self.__complete()
+        r=res1 and res1==res2
+        self.longCenter=longi
+        self.latCenter=lat
         return r
 
         ###########################################################
@@ -390,7 +431,8 @@ class dbMedbox():
         
     def logAlert(alert="ALERT: STATUS UPDATE"):
         """Use: call on time delay to update location in logs if on alert status
-        Optional arg-a string for log message"""
+        Optional arg-a string for log message
+        """########################################################
         if self.mode==-1:
             self.__connect()
             self.log(alert, None, None, None, -1)
@@ -401,27 +443,137 @@ class dbMedbox():
     ############# functions for mode 0 = inactive/restock #########
     ###############################################################
 
-    #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!TODO!!!!!!!!!!!!!!!!!!!!!!!!!
-            
+        ###########################################################
     def getKitNeeds(self,kitName):
-        #self.kitNeeds={}
-        #stores {int binPos:list item props}
-        #where list item props =[type('drug'|'equipt'),itemName
-        #(for 'drug' in format 'proprietaryName : genName'), int qty ]
-        #if item type == 'drug' appends fields:
-        #[route (ie 'SUBCUTANEOUS'), dosage (ie '40 mg/ml, .005 mg/ml')]
+        """use: call once on the start of refill/inactive mode
+        arg: string kit name (test: "ANAPHYLAXIS")
+        return: {int binPos:list item props}
+        where list item props =[prod_id, prod_name, drug_detail, qty]
+        """########################################################        
         global BIN_COUNT
-        """SELECT * FROM kit AS k
-LEFT JOIN drug AS d ON k.drug_ndc=d.ndc
-LEFT JOIN equipt AS e ON e.upn=k.equipt_upn
-ORDER BY score DESC LIMIT %s;"""
-        pass
+        self.__connect()
+        self.cursor.execute("""SELECT
+        if(d.ndc IS NOT NULL,CONCAT("ndc_",d.ndc),CONCAT("upn_",e.upn)) AS prod_id,
+        if(d.ndc IS NOT NULL, CONCAT(gen_name, ":", brand_name), e.name) AS prod_name,
+        if(d.ndc IS NOT NULL, CONCAT(dosage, ":", route), "N/A") AS drug_detail,
+        if(d.ndc IS NOT NULL, d.max_count, e.max_count) AS QTY
+        FROM kit AS k
+        LEFT JOIN drug AS d ON k.drug_ndc=d.ndc
+        LEFT JOIN equipt AS e ON e.upn=k.equipt_upn
+        ORDER BY score DESC LIMIT %s;
+        """, (BIN_COUNT))
+        p=0
+        kit={}
+        for i in self.cursor:
+            kit[p]=[j for j in i]
+            p+=1
+        global DEV_MODE
+        if DEV_MODE:
+            print(kit)
+        self.__complete()
+        self.kitNeeds=kit
+        self.full=False
+        return kit
 
-    def insertItems(self, binPos, qty, drug_ndc, equipt_upn=None):
-        pass
+        ###########################################################
+    def getUpdatedKitNeeds(self):
+        """use: call if needed to update kit needs during refill mode
+        return: {int binPos:list item props}
+        where list item props =[prod_id, prod_name, drug_detail, qty]
+        """########################################################
+        return self.kitNeeds
 
+        ###########################################################
+    def insertItems(self, binPos, qty=1, drug_ndc=None, equipt_upn=None):
+        """inserts a given qty of items where drug_ndc or equipt_upn already
+        recorded in db
+        Args: int binPos, int qty, either the drug_ndc or the product_upn
+        return: bool success
+        """########################################################
+        ndc=False
+        upn=False
+        self.__connect()
+        if drug_ndc:
+            try:
+                self.cursor.execute("""SELECT ndc FROM drug WHERE ndc=%s;
+        """, (int(drug_ndc)))
+                for i in self.cursor:
+                    ndc=i[0]
+            except:
+                pass
+        elif equipt_upn:
+            self.cursor.execute("""SELECT upn FROM equipt WHERE upn=%s;
+        """, (equipt_upn))
+            for i in self.cursor:
+                upn=i[0]
+        res1=False
+        res2=False
+        if ndc:
+            try:
+                res1=self.cursor.execute("""UPDATE bin
+                SET drug_ndc=%s WHERE pos=%s AND box_id=%s;
+                """,(ndc, int(binPos), self.boxId))
+                self.__complete()
+                try:
+                    self.__connect()
+                    res2=self.cursor.execute("""UPDATE bin
+                    SET count=%s WHERE pos=%s AND box_id=%s;
+                    """,(qty, int(binPos), self.boxId))
+                    self.__complete()
+                except:
+                    pass
+            except:
+                pass
+        elif upn:
+            try:
+                res1=self.cursor.execute("""UPDATE bin
+                SET equipt_upn=%s WHERE pos=%s AND box_id=%s;
+                """,(upn, int(binPos), self.boxId))
+                self.__complete()
+                try:
+                    self.__connect()
+                    res2=self.cursor.execute("""UPDATE bin
+                    SET count=%s WHERE pos=%s AND box_id=%s;
+                    """,(qty, int(binPos), self.boxId))
+                    self.__complete()
+                except:
+                    pass
+            except:
+                pass
+        try:
+            if self.kitNeeds[binPos][3]-qty <=0:
+                self.kitNeeds[binPos]=False
+            else:
+                self.kitNeeds[binPos][3]=self.kitNeeds[binPos][3]-qty
+        except:
+            pass
+        return True if res1 and res2 else False
+
+        ###########################################################
+    def insertItemsInKit(self, kit):
+        """arg:  a kit as returned by getKitNeeds
+        return bool success
+        """########################################################
+        res=False
+        for p, l in kit.items():
+            de, de_id=l[0].split("_")
+            if de=="ndc":
+                res=self.insertItems(p, l[3], de_id)
+            else:
+                res=self.insertItems(p, l[3], None, de_id)
+        return res
+            
+        ###########################################################
     def checkFull(self):
-        pass
+        """returns bool if all items found in getKitNeeds have since
+        been inserted
+        """########################################################
+        full=True
+        for p, l in self.kitNeeds:
+            if l:
+                full=False
+                break
+        return full
 
     ###############################################################
     ############# functions for mode 1 = active operation #########
@@ -430,7 +582,7 @@ ORDER BY score DESC LIMIT %s;"""
     ###############################################################
     def getStock(self):
         """returns:
-        dict such as {int binId:list of item properties}
+        dict such as {int binPos:list of item properties}
         where list of item properties for all items includes:
         [
             type('drug'|'equipt'),
@@ -444,9 +596,15 @@ ORDER BY score DESC LIMIT %s;"""
         ]
         """########################################################
         self.__connect()
-        self.cursor.execute("""SELECT b.id,
+        self.cursor.execute("""SELECT b.pos,
         IF(name IS NULL, 'drug', 'equipt') AS type,
-        IF(name IS NULL, CONCAT(brand_name, ' : ', gen_name), name) AS name,
+        IF(name IS NULL,
+            IF(brand_name=gen_name,
+                brand_name,
+                CONCAT(brand_name, ':', gen_name)
+            ),
+            CONCAT(e.name, ':', e.descript)
+        ) AS name
         count, route, dosage
         FROM bin AS b
         LEFT JOIN drug AS d on b.drug_ndc=d.ndc
@@ -463,11 +621,72 @@ ORDER BY score DESC LIMIT %s;"""
         self.__complete()
         return r
 
+        ###########################################################
+    def getNames(self):
+        """returns: dict {binPos:'drug_name'|'equipt_name'}
+        """########################################################
+        self.__connect()
+        self.cursor.execute("""SELECT b.pos,
+        IF(name IS NULL,
+            IF(brand_name=gen_name,
+                brand_name,
+                CONCAT(brand_name, ':', gen_name)
+            ),
+            CONCAT(e.name, ':', e.descript)
+        ) AS name
+        FROM bin AS b
+        LEFT JOIN drug AS d on b.drug_ndc=d.ndc
+        LEFT JOIN equipt AS e on e.upn=b.equipt_upn
+        WHERE box_id = %s;""", self.boxId)
+        r={}
+        for i in self.cursor:
+            r[i[0]]=i[1]
+        self.__complete()
+        return r
+
+        ###########################################################
+    def getCounts(self):
+        """returns: dict {binPos:int count of item in bin}
+        """########################################################
+        self.__connect()
+        self.cursor.execute("""SELECT pos, count
+        FROM bin WHERE box_id = %s;""", self.boxId)
+        r={}
+        for i in self.cursor:
+            r[i[0]]=i[1]
+        self.__complete()
+        return r
+
+        ###########################################################
+    def getItemIds(self):
+        """Return: a dict {binPos: drug_ndc|'equipt_upn'}
+        """########################################################
+        self.__connect()
+        self.cursor.execute("""SELECT b.pos,
+        IF(drug_ndc IS NULL, equipt_upn, drug_ndc) AS item_id
+        FROM bin
+        WHERE box_id = %s;""", self.boxId)
+        r={}
+        for i in self.cursor:
+            r[i[0]]=i[1]
+        self.__complete()
+        return r
+
+        ###########################################################
+    def getBinPosList(self):
+        """Return: a list of all binPos's in box
+        """########################################################
+        self.__connect()
+        self.cursor.execute("SELECT b.pos FROM bin WHERE box_id = %s;", self.boxId)
+        r=[i[0] for i in self.cursor]
+        self.__complete()
+        return r
+        
         ###########################################################                  
     def getEmptyBins(self, stock):
         """arg: dict such as {int binId:list of item properties}
                 as returned by self.getStock()
-        returns:
+        return:
         dict off all bins whose item count ==0,
         such as {int binId:list of item properties}
         where list of item properties for all items includes:
@@ -485,17 +704,36 @@ ORDER BY score DESC LIMIT %s;"""
         return {k:stock[k] for k in stock.keys() if stock[k][2]==0}
 
         ###########################################################
-    def isEmpty(self, stock):
+    def isBoxEmpty(self, stock):
         """arg: dict such as {int binId:list of item properties}
                 as returned by self.getStock()
-        returns: bool isEmpty
+        return: bool isEmpty or -1 on fail
         """########################################################
-        return [k for k in stock.keys() if stock[k][2]==0]==[k for k in stock.keys()]
-    
+        try:
+            return [k for k in stock.keys() if stock[k][2]==0]==[k for k in stock.keys()]
+        except:
+            return -1
+        ###########################################################
+    def getCountInBin(self, binPos):
+        """arg: int binPos
+        return: bool isEmpty or -1 on fail
+        """########################################################
+        self.__connect()
+        r=-1
+        try:
+            self.cursor.execute("""SELECT count FROM bin
+            WHERE pos=1 AND box_id=1 LIMIT 1;""", (int(binPos), self.boxId))
+            for i in self.cursor:
+                r=(self.cursor[0] >0)
+            self.__complete()
+        except:
+            pass
+        return r
+        
 
         ###########################################################
     def activeBoxOpened(self, numReqstByBin):
-        """use in mode 1 active
+        """use: in mode 1 (active) whenever box opened
         arg: a dict {int binPos:int number requested from bin}
         """########################################################
         self.__connect()
@@ -639,7 +877,7 @@ ORDER BY score DESC LIMIT %s;"""
     ###############################################################
 
         ###########################################################
-    def loginAdmin(self,user,pswd):
+    def loginAdmin(self,user=None,pswd=None):
         """Use: call after user provides 2nd step auth offered on rfid swipe by admin
         Returns:   -1=security alert,
                     0=Fail
@@ -647,20 +885,28 @@ ORDER BY score DESC LIMIT %s;"""
         """########################################################
         self.__connect()
         if self.isAdmin1==True:
-            if(self.tryLogin(user,pswd)):
-                self.isAdmin2==True
-                self.lastMode=self.mode
+            global USE_2_LEVEL_AUTH
+            if USE_2_LEVEL_AUTH:
+                if(self.tryLogin(user,pswd)):
+                    self.isAdmin2==True
+                    self.lastMode=self.mode
+                    self.mode=2
+                    self.__connect()
+                    self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
+                    self.__complete()
+                    return 1
+                else:
+                    self.log("WARNING: BAD LOGIN ATTEMPT", None, None, None, -1)
+                    if not self.checkMode(2):
+                        self.log("ALERT: BAD LOGIN ATTEMPTS EXCEEDED", None, None, None, -1)
+                        return -1
+                    return 0
+            else:
                 self.mode=2
                 self.__connect()
                 self.cursor.execute("UPDATE box SET mode=%s", (self.mode))
                 self.__complete()
                 return 1
-            else:
-                self.log("WARNING: BAD LOGIN ATTEMPT", None, None, None, -1)
-                if not self.checkMode(2):
-                    self.log("ALERT: BAD LOGIN ATTEMPTS EXCEEDED", None, None, None, -1)
-                    return -1
-                return 0
         self.mode=-1
         self.log("ALERT: UNAUTHORIZED LOGIN ATTEMPT", None, None, None, -1)
         self.__connect()
@@ -690,9 +936,9 @@ ORDER BY score DESC LIMIT %s;"""
                    1=success, changed
                    2=failure (like dup info used by other employee)
         """########################################################
-        if self.isAdmin2==True and self.isAdmin1==True:
+        if (self.isAdmin2==True or not self.useAdmin2) and self.isAdmin1==True:
             if self.mode==2:
-                c=encrypt.crypt()
+                c=encrypt.Crypt()
                 str1=c.getSha2_512(pswd)
                 str2=c.getSha2_512(user, str1.split(':')[1])
                 creds=str1+":"+str2.split(':')[0]
@@ -725,7 +971,7 @@ ORDER BY score DESC LIMIT %s;"""
                     0=not admin mode/no change
                     1=success
         """
-        if self.isAdmin2 and self.isAdmin1:
+        if (self.isAdmin2==True or not self.useAdmin2) and self.isAdmin1:
             if self.mode==2:
                 global WARNING_TOLERANCE
                 WARNING_TOLERANCE=numWarningsAllowed
@@ -748,7 +994,7 @@ ORDER BY score DESC LIMIT %s;"""
                     1=success
         """
         self.__connect()
-        if self.isAdmin2 and self.isAdmin1:
+        if (self.isAdmin2==True or not self.useAdmin2) and self.isAdmin1:
             if self.mode==2:
                 self.mileRadius=miles
                 self.log("RADIUS SET: TO "+str(self.mileRadius))
@@ -772,7 +1018,7 @@ ORDER BY score DESC LIMIT %s;"""
                     int drug_ndc, str equipt_upn, int mode, float latitude,
                     float longitude),(...)]
         """
-        if self.isAdmin2==True and self.isAdmin1==True:
+        if (self.isAdmin2==True or not self.useAdmin2) and self.isAdmin1==True:
             if self.mode==2:
                 self.__connect()
                 self.cursor.execute("""SELECT id, code, event, tm, rfid_id, drug_ndc,
@@ -819,8 +1065,6 @@ ORDER BY score DESC LIMIT %s;"""
         return 0
         
 
-    def changeCenterPoint(self, lat, longi):
-        res=self.setDegrees(lat, longi, True)
 
 
     #TODO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -834,15 +1078,95 @@ ORDER BY score DESC LIMIT %s;"""
     def assignWorkerRFID(self, workerId):
         pass
 
-    def changeAuth(self, num, auth):
-        pass
+        ###########################################################
+    def changeAuthByRFID(self, rfidIn, auth):
+        """args: rfid strings, desired new auth level
+         returns bool success
+        """########################################################
+        res=False
+        self.__connect()
+        self.cursor.execute("SELECT data FROM rfid;")
+        c=encrypt.Crypt()
+        hashStr=c.checkSha2_512(rfidIn, self.cursor)
+        if hashStr:
+            res=self.cursor.execute("""UPDATE rfid
+            SET auth=%s WHERE data=%s""",(auth, hashStr))
+        self.__complete()
+        return res
 
+        ###########################################################
     def resetBox(self):
+        ###########################################################
+        newDB=dbReset.CreateDB()
+        newDB.reset()
         self.__init__(self.latitude, self.longitude)
-    
 
+        ###########################################################    
+    def getDumpFile(self):
+        """Creates dump.text, a tab deliniated file which can be parsed
+        from master db to get box data for its' tables:  logbox and worker.
+        Table data seperated blank line
+        """########################################################
+        self.__connect()
+        self.cursor.execute("""SELECT box_id, id AS log_id, tm, latitude, longitude,
+        code, event, mode, rfid_id, drug_ndc, equipt_upn
+        FROM logbox WHERE box_id=%s;""", (self.boxId))
+        with open ("dumpfile.txt", "w") as df:
+            for i in self.cursor:
+                [df.write(str(i[j])+"\t") for j in range(len(i)-1)]
+                df.write(str(i[-1])+"\n")
+            df.write("\n")
+            self.cursor.execute("""SELECT r.id AS rfid_id, worker_id,
+            employee_id, employer_id, name, auth
+            FROM rfid AS r JOIN worker AS w ON r.worker_id=w.id;""")
+            for i in self.cursor:
+                df.write(str(self.boxId)+"\t")
+                [df.write(str(i[j])+"\t") for j in range(len(i)-1)]
+                df.write(str(i[-1])+"\n")
+        self.__complete()
 
+        ###########################################################
+    def parseDump(self):
+        """TEST FUNCTION: This will be removed,
+        it would be located in the master db to parse the dumpfile.txt 
+        it receives into list of sql statements to execute
+        """########################################################
+        with open ("dumpfile.txt", "r") as df:
+            file=df.read()
+        try:
+            lines=file.split('\n')
+            fields=[i.split('\t') for i in lines]
+        except:
+            return False
+        table="logbox"
+        sql=[]
+        for i in fields:
+            if len(i[0])> 0:
+                sql.append("INSERT INTO "+table+" VALUES ("+",".join(["'"+j+"'" for j in i])+");")
+            else:
+                table="worker"
+        return sql
             
+                    
 ################################################################################
+#test=DbMedbox(False, False)
+"""
+test.mode=1
+print("\nMODE="+str(test.mode))
+print("medtech rfid="+str(test.checkInRFID('6A004A16C0')))#your str
+print("medtech rfid="+str(test.checkInRFID('0F0303723B')))#your str
+print("stocker rfid="+str(test.checkInRFID('0F03036E8D')))
+print("admin rfid="+str(test.checkInRFID('770096EE82')))
+test.mode=0
+print("\nMODE="+str(test.mode))
+print("medtech rfid="+str(test.checkInRFID('6A004A16C0')))#your str
+print("medtech rfid="+str(test.checkInRFID('0F0303723B')))#your str
+print("stocker rfid="+str(test.checkInRFID('0F03036E8D')))
+print("admin rfid="+str(test.checkInRFID('770096EE82')))
+"""
 
 
+#test.getDumpFile()
+#print(test.parseDump())
+
+#print(test.checkInRange())
